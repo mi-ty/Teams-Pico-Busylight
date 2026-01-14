@@ -1,6 +1,8 @@
 from machine import Pin
 import neopixel
 import time
+import sys
+import select
 
 # Configure the WS2812B
 LED_PIN = 0  # GPIO pin connected to the LED data line
