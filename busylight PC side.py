@@ -202,6 +202,112 @@ class LocalTeamsMonitor:
                 print(f"[DEBUG] settings error: {e}")
             return None
 
+    def _read_from_ebwebview_storage(self):
+        """Read status from EBWebView Local Storage and Session Storage"""
+        try:
+            ebwebview_path = os.path.join(self.teams_path, 'EBWebView')
+            if not os.path.exists(ebwebview_path):
+                if self.debug:
+                    print(f"[DEBUG] EBWebView directory not found")
+                return None
+
+            if self.debug:
+                print(f"[DEBUG] Searching EBWebView directory thoroughly...")
+
+            # Search all files in EBWebView recursively
+            for root, dirs, files in os.walk(ebwebview_path):
+                for file in files:
+                    file_path = os.path.join(root, file)
+
+                    # Skip binary files that are too large
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        if file_size > 50 * 1024 * 1024:  # Skip files > 50MB
+                            continue
+
+                        # Check various file types that might contain status
+                        if any(ext in file.lower() for ext in ['.log', '.ldb', '.leveldb', '.localstorage',
+                                                                '.sessionstorage', '.json', 'storage',
+                                                                'cookies', 'preferences']):
+                            try:
+                                if self.debug:
+                                    print(f"[DEBUG] Checking {file}")
+
+                                with open(file_path, 'rb') as f:
+                                    content = f.read().decode('utf-8', errors='ignore').lower()
+
+                                    # Look for status in the content
+                                    for key, value in STATUS_MAPPING.items():
+                                        if key in content:
+                                            if self.debug:
+                                                print(f"[DEBUG] EBWebView/{file}: Found status '{value}'")
+                                            return value
+                            except Exception as e:
+                                if self.debug and 'permission' in str(e).lower():
+                                    print(f"[DEBUG] Permission denied: {file}")
+                                continue
+                    except:
+                        continue
+
+            return None
+
+        except Exception as e:
+            if self.debug:
+                print(f"[DEBUG] EBWebView search error: {e}")
+            return None
+
+    def _read_from_windows_registry(self):
+        """Read Teams status from Windows Registry (Teams 2.0 specific)"""
+        try:
+            import winreg
+
+            if self.debug:
+                print("[DEBUG] Checking Windows Registry...")
+
+            # Teams 2.0 might store status in user registry
+            reg_paths = [
+                r"SOFTWARE\Microsoft\Office\Teams",
+                r"SOFTWARE\Microsoft\Teams",
+                r"SOFTWARE\Classes\Local Settings\Software\Microsoft\Teams",
+            ]
+
+            for reg_path in reg_paths:
+                try:
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_READ)
+
+                    # Try to read various possible value names
+                    value_names = ['PresenceState', 'Status', 'Availability', 'UserState']
+                    for value_name in value_names:
+                        try:
+                            value, _ = winreg.QueryValueEx(key, value_name)
+                            if self.debug:
+                                print(f"[DEBUG] Registry: Found {value_name} = {value}")
+
+                            # Map the value to our status
+                            value_lower = str(value).lower()
+                            for status_key, status_value in STATUS_MAPPING.items():
+                                if status_key in value_lower:
+                                    if self.debug:
+                                        print(f"[DEBUG] Registry: Mapped to '{status_value}'")
+                                    winreg.CloseKey(key)
+                                    return status_value
+                        except FileNotFoundError:
+                            continue
+
+                    winreg.CloseKey(key)
+                except WindowsError:
+                    continue
+
+            return None
+
+        except ImportError:
+            # Not on Windows
+            return None
+        except Exception as e:
+            if self.debug:
+                print(f"[DEBUG] Registry error: {e}")
+            return None
+
     def _read_from_storage_json(self):
         """Read status from Teams storage JSON files and IndexedDB"""
         try:
@@ -341,7 +447,23 @@ class LocalTeamsMonitor:
         # Try multiple methods to get status
         status = None
 
-        # Method 1: Read from settings.json
+        # Method 1: Windows Registry (Teams 2.0 specific)
+        status = self._read_from_windows_registry()
+        if status:
+            if self.debug:
+                print(f"[DEBUG] ✓ Status found via Registry: {status}")
+            self.last_status = status
+            return status
+
+        # Method 2: EBWebView storage (Teams 2.0 specific)
+        status = self._read_from_ebwebview_storage()
+        if status:
+            if self.debug:
+                print(f"[DEBUG] ✓ Status found via EBWebView: {status}")
+            self.last_status = status
+            return status
+
+        # Method 3: Read from settings.json / app_settings.json
         status = self._read_from_settings_json()
         if status:
             if self.debug:
@@ -349,7 +471,7 @@ class LocalTeamsMonitor:
             self.last_status = status
             return status
 
-        # Method 2: Read from logs.db (most reliable if accessible)
+        # Method 4: Read from logs.db (most reliable if accessible)
         status = self._read_from_logs_db()
         if status:
             if self.debug:
@@ -357,7 +479,7 @@ class LocalTeamsMonitor:
             self.last_status = status
             return status
 
-        # Method 3: Read from storage/cache JSON files
+        # Method 5: Read from storage/cache JSON files
         status = self._read_from_storage_json()
         if status:
             if self.debug:
@@ -365,7 +487,7 @@ class LocalTeamsMonitor:
             self.last_status = status
             return status
 
-        # Method 4: Parse log text files
+        # Method 6: Parse log text files
         status = self._read_from_logs_txt()
         if status:
             if self.debug:
