@@ -160,7 +160,51 @@ else:
     pulse_color(color)  # Enable pulsing for non-busy states
 ```
 
+## Debugging
+
+If the status detection isn't working correctly, enable debug mode:
+
+1. Open `busylight PC side.py`
+2. Change line 15: `DEBUG_MODE = True`
+3. Run the script and observe detailed logging
+
+Debug output will show:
+- Teams directory structure
+- Which files exist
+- Which detection methods are being tried
+- What status (if any) was found in each file
+
+Example debug output:
+```
+[DEBUG] Teams is running, checking status sources...
+[DEBUG] settings.json not found at ...
+[DEBUG] logs.db not found at ...
+[DEBUG] Checking C:\...\storage.json
+[DEBUG] storage.json: Found status 'Busy'
+[DEBUG] ✓ Status found via storage JSON: Busy
+```
+
 ## Troubleshooting
+
+### Status always shows "Available" (incorrect)
+**This is a known issue with the local file method.** Enable DEBUG_MODE to diagnose:
+
+1. Set `DEBUG_MODE = True` in the script
+2. Run and check which files are being read
+3. Manually check your Teams status in the Teams app
+4. Look for the status in the debug output
+
+**Common causes:**
+- Teams data files may not contain real-time status
+- New Teams (2.0) stores data differently than classic Teams
+- Status may only update when changed manually
+- Some organizations disable local status caching
+
+**Solutions:**
+- Try manually changing your status in Teams
+- Check if you're using new Teams vs classic Teams
+- Look at debug output to see which files exist
+- The script will show which method found a status
 
 ### "Could not open port COM3"
 - Ensure the Pico is connected

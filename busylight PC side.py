@@ -11,6 +11,9 @@ from pathlib import Path
 # Configure serial connection to Pico
 PICO_PORT = 'COM3'  # Windows - change to /dev/ttyACM0 on Linux/Mac
 
+# Enable debug mode (set to True for detailed logging)
+DEBUG_MODE = True  # Change to False to disable debug output
+
 # Teams presence status mapping
 STATUS_MAPPING = {
     'available': 'Available',
@@ -28,18 +31,54 @@ STATUS_MAPPING = {
 class LocalTeamsMonitor:
     """Monitor Teams status by reading local files"""
 
-    def __init__(self):
+    def __init__(self, debug=False):
         self.teams_path = self._find_teams_path()
         self.last_status = 'Offline'
+        self.debug = debug
         print(f"Teams data path: {self.teams_path}")
+
+        if self.debug:
+            self._debug_teams_directory()
+
+    def _debug_teams_directory(self):
+        """Debug: List Teams directory structure"""
+        print("\n=== DEBUG: Teams Directory Structure ===")
+        if os.path.exists(self.teams_path):
+            try:
+                for root, dirs, files in os.walk(self.teams_path):
+                    # Only show first 2 levels to avoid spam
+                    level = root.replace(self.teams_path, '').count(os.sep)
+                    if level < 2:
+                        indent = ' ' * 2 * level
+                        print(f'{indent}{os.path.basename(root)}/')
+                        sub_indent = ' ' * 2 * (level + 1)
+                        for file in files[:10]:  # Limit files shown
+                            print(f'{sub_indent}{file}')
+            except Exception as e:
+                print(f"Error listing directory: {e}")
+        else:
+            print(f"Teams path does not exist: {self.teams_path}")
+        print("========================================\n")
 
     def _find_teams_path(self):
         """Find Teams application data path"""
         system = platform.system()
 
         if system == 'Windows':
-            # Teams stores data in AppData\Roaming\Microsoft\Teams
-            base_path = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Teams')
+            # Try new Teams first (Teams 2.0), then classic Teams
+            appdata = os.environ.get('APPDATA', '')
+            localappdata = os.environ.get('LOCALAPPDATA', '')
+
+            # New Teams path
+            new_teams_path = os.path.join(localappdata, 'Packages',
+                                         'MSTeams_8wekyb3d8bbwe', 'LocalCache', 'Microsoft', 'MSTeams')
+            if os.path.exists(new_teams_path):
+                return new_teams_path
+
+            # Classic Teams path
+            classic_path = os.path.join(appdata, 'Microsoft', 'Teams')
+            return classic_path
+
         elif system == 'Darwin':  # macOS
             base_path = os.path.expanduser('~/Library/Application Support/Microsoft/Teams')
         else:  # Linux
@@ -72,6 +111,8 @@ class LocalTeamsMonitor:
         try:
             db_path = os.path.join(self.teams_path, 'logs.db')
             if not os.path.exists(db_path):
+                if self.debug:
+                    print(f"[DEBUG] logs.db not found at {db_path}")
                 return None
 
             conn = sqlite3.connect(db_path, timeout=1)
@@ -91,17 +132,65 @@ class LocalTeamsMonitor:
             rows = cursor.fetchall()
             conn.close()
 
+            if self.debug and rows:
+                print(f"[DEBUG] Found {len(rows)} log entries")
+
             # Parse the most recent status from log messages
             for row in rows:
                 message = row[0].lower()
+                if self.debug:
+                    print(f"[DEBUG] Log message: {message[:100]}...")
                 for key, value in STATUS_MAPPING.items():
                     if key in message:
+                        if self.debug:
+                            print(f"[DEBUG] logs.db: Found status '{value}'")
                         return value
 
             return None
 
         except Exception as e:
             # Database might be locked or not exist
+            if self.debug:
+                print(f"[DEBUG] logs.db error: {e}")
+            return None
+
+    def _read_from_settings_json(self):
+        """Read status from Teams settings.json"""
+        try:
+            settings_path = os.path.join(self.teams_path, 'settings.json')
+            if not os.path.exists(settings_path):
+                if self.debug:
+                    print(f"[DEBUG] settings.json not found at {settings_path}")
+                return None
+
+            with open(settings_path, 'r', encoding='utf-8', errors='ignore') as f:
+                try:
+                    data = json.load(f)
+                    if self.debug:
+                        print(f"[DEBUG] settings.json loaded successfully")
+
+                    # Look for presence or status keys
+                    json_str = json.dumps(data).lower()
+                    for key, value in STATUS_MAPPING.items():
+                        if key in json_str:
+                            if self.debug:
+                                print(f"[DEBUG] settings.json: Found status '{value}'")
+                            return value
+                except json.JSONDecodeError:
+                    # Try as plain text
+                    f.seek(0)
+                    content = f.read().lower()
+                    for key, value in STATUS_MAPPING.items():
+                        if key in content:
+                            if self.debug:
+                                print(f"[DEBUG] settings.json (text): Found status '{value}'")
+                            return value
+
+            return None
+
+        except Exception as e:
+            if self.debug:
+                print(f"[DEBUG] settings.json error: {e}")
             return None
 
     def _read_from_storage_json(self):
@@ -117,19 +206,31 @@ class LocalTeamsMonitor:
             for storage_file in storage_paths:
                 if os.path.exists(storage_file):
                     try:
+                        if self.debug:
+                            print(f"[DEBUG] Checking {storage_file}")
+
                         with open(storage_file, 'r', encoding='utf-8', errors='ignore') as f:
                             content = f.read().lower()
 
                             # Look for status patterns in the file
                             for key, value in STATUS_MAPPING.items():
                                 if key in content:
+                                    if self.debug:
+                                        print(f"[DEBUG] {os.path.basename(storage_file)}: Found status '{value}'")
                                     return value
-                    except:
+                    except Exception as e:
+                        if self.debug:
+                            print(f"[DEBUG] Error reading {storage_file}: {e}")
                         continue
+                else:
+                    if self.debug:
+                        print(f"[DEBUG] File not found: {storage_file}")
 
             return None
 
         except Exception as e:
+            if self.debug:
+                print(f"[DEBUG] storage_json error: {e}")
             return None
 
     def _read_from_logs_txt(self):
@@ -137,6 +238,8 @@ class LocalTeamsMonitor:
         try:
             logs_dir = os.path.join(self.teams_path, 'logs')
             if not os.path.exists(logs_dir):
+                if self.debug:
+                    print(f"[DEBUG] logs directory not found at {logs_dir}")
                 return None
 
             # Find the most recent log file
@@ -147,11 +250,16 @@ class LocalTeamsMonitor:
                     log_files.append((file_path, os.path.getmtime(file_path)))
 
             if not log_files:
+                if self.debug:
+                    print(f"[DEBUG] No log files found in {logs_dir}")
                 return None
 
             # Sort by modification time, most recent first
             log_files.sort(key=lambda x: x[1], reverse=True)
             most_recent_log = log_files[0][0]
+
+            if self.debug:
+                print(f"[DEBUG] Reading log file: {os.path.basename(most_recent_log)}")
 
             # Read last 100 lines of the most recent log
             with open(most_recent_log, 'r', encoding='utf-8', errors='ignore') as f:
@@ -165,11 +273,15 @@ class LocalTeamsMonitor:
                     if 'presence' in line_lower or 'availability' in line_lower or 'status' in line_lower:
                         for key, value in STATUS_MAPPING.items():
                             if key in line_lower:
+                                if self.debug:
+                                    print(f"[DEBUG] log file: Found status '{value}' in line: {line[:80]}...")
                                 return value
 
             return None
 
         except Exception as e:
+            if self.debug:
+                print(f"[DEBUG] logs_txt error: {e}")
             return None
 
     def get_teams_status(self):
@@ -177,32 +289,60 @@ class LocalTeamsMonitor:
 
         # First check if Teams is running
         if not self._is_teams_running():
+            if self.debug:
+                print("[DEBUG] Teams process not running")
             return 'Offline'
+
+        if self.debug:
+            print("[DEBUG] Teams is running, checking status sources...")
 
         # Try multiple methods to get status
         status = None
 
-        # Method 1: Read from logs.db (most reliable if accessible)
+        # Method 1: Read from settings.json
+        status = self._read_from_settings_json()
+        if status:
+            if self.debug:
+                print(f"[DEBUG] ✓ Status found via settings.json: {status}")
+            self.last_status = status
+            return status
+
+        # Method 2: Read from logs.db (most reliable if accessible)
         status = self._read_from_logs_db()
         if status:
+            if self.debug:
+                print(f"[DEBUG] ✓ Status found via logs.db: {status}")
             self.last_status = status
             return status
 
-        # Method 2: Read from storage/cache JSON files
+        # Method 3: Read from storage/cache JSON files
         status = self._read_from_storage_json()
         if status:
+            if self.debug:
+                print(f"[DEBUG] ✓ Status found via storage JSON: {status}")
             self.last_status = status
             return status
 
-        # Method 3: Parse log text files
+        # Method 4: Parse log text files
         status = self._read_from_logs_txt()
         if status:
+            if self.debug:
+                print(f"[DEBUG] ✓ Status found via log files: {status}")
             self.last_status = status
             return status
 
-        # If Teams is running but we can't determine status, assume Available
-        # or return last known status
-        return self.last_status if self.last_status != 'Offline' else 'Available'
+        # If Teams is running but we can't determine status
+        # Return last known status or Available as fallback
+        if self.debug:
+            print(f"[DEBUG] ⚠ Could not determine status, using last known: {self.last_status}")
+
+        # Only default to Available if we've never successfully read a status
+        if self.last_status == 'Offline':
+            if self.debug:
+                print("[DEBUG] Defaulting to Available (first run)")
+            return 'Available'
+
+        return self.last_status
 
 def get_teams_status():
     """Get current Teams status"""
@@ -228,7 +368,7 @@ except serial.SerialException as e:
 
 # Initialize monitor
 try:
-    monitor = LocalTeamsMonitor()
+    monitor = LocalTeamsMonitor(debug=DEBUG_MODE)
 except Exception as e:
     print(f"ERROR: Failed to initialize Teams monitor: {e}")
     ser.close()
