@@ -234,14 +234,42 @@ class LocalTeamsMonitor:
                                     print(f"[DEBUG] Checking {file}")
 
                                 with open(file_path, 'rb') as f:
-                                    content = f.read().decode('utf-8', errors='ignore').lower()
+                                    content = f.read().decode('utf-8', errors='ignore')
+                                    content_lower = content.lower()
 
-                                    # Look for status in the content
-                                    for key, value in STATUS_MAPPING.items():
-                                        if key in content:
-                                            if self.debug:
-                                                print(f"[DEBUG] EBWebView/{file}: Found status '{value}'")
-                                            return value
+                                    # Look for more specific presence patterns
+                                    # Teams uses specific keys like "presence", "userState", "availability"
+                                    presence_patterns = [
+                                        '"presence":"',
+                                        '"userstate":"',
+                                        '"availability":"',
+                                        '"status":"',
+                                        'presence=',
+                                        'userstate=',
+                                        'availability=',
+                                    ]
+
+                                    # Check if this file has presence-related keys
+                                    has_presence_key = any(pattern in content_lower for pattern in presence_patterns)
+
+                                    if has_presence_key:
+                                        # Try to extract the value near the presence key
+                                        for pattern in presence_patterns:
+                                            if pattern in content_lower:
+                                                # Find position and extract value
+                                                pos = content_lower.find(pattern)
+                                                # Get 50 characters after the pattern
+                                                snippet = content_lower[pos:pos+70]
+
+                                                if self.debug:
+                                                    print(f"[DEBUG] Found presence pattern in {file}: {snippet[:60]}...")
+
+                                                # Check for status keywords in this specific area
+                                                for key, value in STATUS_MAPPING.items():
+                                                    if key in snippet:
+                                                        if self.debug:
+                                                            print(f"[DEBUG] EBWebView/{file}: Found status '{value}' near presence key")
+                                                        return value
                             except Exception as e:
                                 if self.debug and 'permission' in str(e).lower():
                                     print(f"[DEBUG] Permission denied: {file}")
@@ -384,23 +412,35 @@ class LocalTeamsMonitor:
                         print(f"[DEBUG] {logs_dir} not found")
                     continue
 
-                # Find the most recent log file (check all MSTeams*.log files)
-                log_files = []
+                # Find the most recent log files, prioritize MSTeams process logs
+                msteams_logs = []
+                other_logs = []
+
                 for file in os.listdir(logs_dir):
                     if file.endswith('.txt') or file.endswith('.log'):
                         file_path = os.path.join(logs_dir, file)
-                        log_files.append((file_path, os.path.getmtime(file_path)))
+                        mtime = os.path.getmtime(file_path)
 
-                if not log_files:
+                        # Prioritize actual MSTeams process logs over Launcher/Background logs
+                        if file.startswith('MSTeams_') and not 'Launcher' in file and not 'Background' in file and not 'NM_' in file:
+                            msteams_logs.append((file_path, mtime))
+                        else:
+                            other_logs.append((file_path, mtime))
+
+                # Sort both lists by modification time
+                msteams_logs.sort(key=lambda x: x[1], reverse=True)
+                other_logs.sort(key=lambda x: x[1], reverse=True)
+
+                # Check MSTeams logs first (most recent 5), then others
+                log_files_to_check = msteams_logs[:5] + other_logs[:2]
+
+                if not log_files_to_check:
                     if self.debug:
                         print(f"[DEBUG] No log files found in {logs_dir}")
                     continue
 
-                # Sort by modification time, most recent first
-                log_files.sort(key=lambda x: x[1], reverse=True)
-
-                # Check the most recent 3 log files
-                for log_file_path, _ in log_files[:3]:
+                # Check the prioritized log files
+                for log_file_path, _ in log_files_to_check:
                     if self.debug:
                         print(f"[DEBUG] Reading log file: {os.path.basename(log_file_path)}")
 
@@ -413,12 +453,24 @@ class LocalTeamsMonitor:
                             for line in reversed(lines[-200:]):
                                 line_lower = line.lower()
 
-                                # Look for presence/status updates with various patterns
-                                if any(keyword in line_lower for keyword in ['presence', 'availability', 'status', 'userstate']):
+                                # Look for specific presence update patterns (more precise)
+                                presence_keywords = [
+                                    'presence updated',
+                                    'presence changed',
+                                    'set presence',
+                                    'user presence',
+                                    'availability:',
+                                    'userstate:',
+                                    '"presence":',
+                                    '"availability":'
+                                ]
+
+                                if any(keyword in line_lower for keyword in presence_keywords):
+                                    # This line mentions presence, check for status nearby
                                     for key, value in STATUS_MAPPING.items():
                                         if key in line_lower:
                                             if self.debug:
-                                                print(f"[DEBUG] log file: Found status '{value}' in line: {line[:80]}...")
+                                                print(f"[DEBUG] log file: Found status '{value}' in line: {line.strip()[:100]}...")
                                             return value
                     except Exception as e:
                         if self.debug:
