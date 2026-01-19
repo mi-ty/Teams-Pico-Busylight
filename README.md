@@ -25,9 +25,10 @@ This project monitors your Microsoft Teams presence status and displays it on an
 - Python 3.7+
 - Required Python packages:
   ```bash
-  pip install pyserial
+  pip install mss pyserial
   ```
 - Microsoft Teams desktop application (running on the same computer)
+- Teams window must be visible (not minimized)
 
 ### Pico Side
 - MicroPython firmware installed on Pico
@@ -100,24 +101,26 @@ Press Ctrl+C to exit
 
 ## How It Works
 
-The monitor reads your Teams status **locally** from your computer without requiring Azure AD setup:
+The monitor reads your Teams status by **capturing the status indicator pixel** from your screen:
 
-1. **Process Detection**: Checks if Teams.exe is running
-2. **Local File Reading**: Reads status from multiple sources:
-   - `logs.db` - SQLite database with presence logs
-   - `storage.json` - Cached user status
-   - Log files - Recent activity logs
-3. **Status Updates**: Sends status changes to Pico via USB serial
-4. **LED Control**: Pico updates LED color based on received status
+1. **Screen Capture**: Captures a single pixel at coordinates (131, 34) from your screen
+2. **Color Matching**: Compares the RGB color to known Teams status colors
+3. **Status Detection**: Uses Euclidean distance to find the closest matching status
+4. **Status Updates**: Sends status changes to Pico via USB serial every 2 seconds
+5. **LED Control**: Pico updates LED color based on received status
 
-**Advantages of Local Method:**
-- ✅ No Azure AD app registration required
-- ✅ No admin consent needed
-- ✅ Works offline (no internet required)
-- ✅ Instant updates (no API rate limits)
-- ✅ No credentials or secrets to manage
+**Advantages of Screen Capture Method:**
+- ✅ Works with Teams 2.0 and Classic Teams
+- ✅ No file system access required
+- ✅ Real-time updates (2-second polling)
+- ✅ No credentials or Azure AD setup needed
+- ✅ Simple and reliable
+- ✅ Easy to calibrate for different displays
 
-**Note**: The local method reads Teams data files which may be locked while Teams is running. The script tries multiple methods to ensure reliable status detection.
+**Requirements:**
+- Teams window must be visible on screen (status indicator visible)
+- Works with any Teams version (Classic or 2.0)
+- Pixel location may need adjustment if Teams window is in different position
 
 ## LED Color Mapping
 
@@ -160,62 +163,78 @@ else:
     pulse_color(color)  # Enable pulsing for non-busy states
 ```
 
+## Calibration
+
+The script captures a pixel at coordinates **(131, 34)** which should be the Teams status indicator. You may need to adjust this:
+
+### Finding the Correct Pixel Location:
+
+1. **Position your Teams window** in its normal location
+2. **Take a screenshot** with Teams status visible (use Print Screen or Snipping Tool)
+3. **Open in Paint** or any image viewer that shows pixel coordinates
+4. **Hover over the status indicator dot** (the colored circle showing your status)
+5. **Note the X and Y coordinates** shown in the bottom of the window
+6. **Update the script** with your coordinates:
+   ```python
+   STATUS_PIXEL_X = 131  # Your X coordinate
+   STATUS_PIXEL_Y = 34   # Your Y coordinate
+   ```
+
+### Calibrating Colors:
+
+If the status detection is incorrect, you may need to calibrate colors for your display:
+
+1. **Enable debug mode** (`DEBUG_MODE = True` on line 11)
+2. **Set your Teams status** to a known state (e.g., "Busy")
+3. **Run the script** and observe the debug output:
+   ```
+   [DEBUG] Pixel color at (131, 34): RGB(196, 49, 75)
+   [DEBUG] Distance to Available (146, 195, 83): 162.45
+   [DEBUG] Distance to Busy (196, 49, 75): 0.00
+   [DEBUG] ✓ Matched to 'Busy' (distance: 0.00)
+   ```
+4. **Copy the RGB values** shown for each status
+5. **Update `COLOR_TO_STATUS`** dictionary with your actual colors
+
 ## Debugging
 
-If the status detection isn't working correctly, enable debug mode:
+Debug mode shows detailed information about pixel capture and color matching.
 
+Enable debug mode:
 1. Open `busylight PC side.py`
-2. Change line 15: `DEBUG_MODE = True`
-3. Run the script and observe detailed logging
-
-Debug output will show:
-- Teams directory structure
-- Which files exist
-- Which detection methods are being tried
-- What status (if any) was found in each file
+2. Set `DEBUG_MODE = True` (line 11)
+3. Run the script
 
 Example debug output:
 ```
-[DEBUG] Teams is running, checking status sources...
-[DEBUG] settings.json not found at ...
-[DEBUG] logs.db not found at ...
-[DEBUG] Checking C:\...\storage.json
-[DEBUG] storage.json: Found status 'Busy'
-[DEBUG] ✓ Status found via storage JSON: Busy
+[DEBUG] Pixel color at (131, 34): RGB(196, 49, 75)
+[DEBUG] Distance to Available (146, 195, 83): 162.45
+[DEBUG] Distance to Busy (196, 49, 75): 0.00
+[DEBUG] Distance to DoNotDisturb (191, 48, 74): 6.40
+[DEBUG] ✓ Matched to 'Busy' (distance: 0.00)
+[2026-01-19 16:45:12] Status changed to: Busy
 ```
 
 ## Troubleshooting
 
-### Status always shows "Available" (incorrect)
-**This is a known issue with the local file method.** Enable DEBUG_MODE to diagnose:
-
-1. Set `DEBUG_MODE = True` in the script
-2. Run and check which files are being read
-3. Manually check your Teams status in the Teams app
-4. Look for the status in the debug output
-
-**Common causes:**
-- Teams data files may not contain real-time status
-- New Teams (2.0) stores data differently than classic Teams
-- Status may only update when changed manually
-- Some organizations disable local status caching
-
-**Solutions:**
-- Try manually changing your status in Teams
-- Check if you're using new Teams vs classic Teams
-- Look at debug output to see which files exist
-- The script will show which method found a status
+### Status is always wrong or doesn't change
+1. **Check pixel location**: The status indicator must be at (131, 34) on your screen
+   - Try taking a screenshot and measuring the exact position
+   - Update `STATUS_PIXEL_X` and `STATUS_PIXEL_Y` in the script
+2. **Calibrate colors**: Your display might show different RGB values
+   - Enable debug mode to see actual pixel colors
+   - Update `COLOR_TO_STATUS` with your actual colors
+3. **Ensure Teams window is visible**: The status indicator must not be minimized or covered
 
 ### "Could not open port COM3"
-- Ensure the Pico is connected
+- Ensure the Pico is connected via USB
 - Check Device Manager (Windows) or `ls /dev/tty*` (Linux/Mac) for correct port
 - Make sure no other program (like Thonny) is using the serial port
 
-### "Teams data path not found" or status always shows "Offline"
-- Ensure Microsoft Teams desktop app is installed and running
-- Verify Teams is logged in and active
-- Check that Teams data folder exists at the path shown in console output
-- Try manually changing your Teams status to trigger file updates
+### Status shows "Offline" constantly
+- Make sure Teams window is visible on screen (not minimized)
+- Check that the status indicator is actually at coordinates (131, 34)
+- Enable debug mode to see what pixel color is being captured
 
 ### LED not lighting up
 - Check wiring connections
