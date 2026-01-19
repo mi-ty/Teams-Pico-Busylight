@@ -155,52 +155,63 @@ class LocalTeamsMonitor:
             return None
 
     def _read_from_settings_json(self):
-        """Read status from Teams settings.json"""
+        """Read status from Teams settings/app_settings.json"""
         try:
-            settings_path = os.path.join(self.teams_path, 'settings.json')
-            if not os.path.exists(settings_path):
-                if self.debug:
-                    print(f"[DEBUG] settings.json not found at {settings_path}")
-                return None
+            # Try both settings.json and app_settings.json (new Teams uses app_settings)
+            settings_files = [
+                os.path.join(self.teams_path, 'settings.json'),
+                os.path.join(self.teams_path, 'app_settings.json'),
+            ]
 
-            with open(settings_path, 'r', encoding='utf-8', errors='ignore') as f:
-                try:
-                    data = json.load(f)
+            for settings_path in settings_files:
+                if not os.path.exists(settings_path):
                     if self.debug:
-                        print(f"[DEBUG] settings.json loaded successfully")
+                        print(f"[DEBUG] {os.path.basename(settings_path)} not found")
+                    continue
 
-                    # Look for presence or status keys
-                    json_str = json.dumps(data).lower()
-                    for key, value in STATUS_MAPPING.items():
-                        if key in json_str:
-                            if self.debug:
-                                print(f"[DEBUG] settings.json: Found status '{value}'")
-                            return value
-                except json.JSONDecodeError:
-                    # Try as plain text
-                    f.seek(0)
-                    content = f.read().lower()
-                    for key, value in STATUS_MAPPING.items():
-                        if key in content:
-                            if self.debug:
-                                print(f"[DEBUG] settings.json (text): Found status '{value}'")
-                            return value
+                if self.debug:
+                    print(f"[DEBUG] Checking {os.path.basename(settings_path)}")
+
+                with open(settings_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    try:
+                        data = json.load(f)
+                        if self.debug:
+                            print(f"[DEBUG] {os.path.basename(settings_path)} loaded successfully")
+
+                        # Look for presence or status keys
+                        json_str = json.dumps(data).lower()
+                        for key, value in STATUS_MAPPING.items():
+                            if key in json_str:
+                                if self.debug:
+                                    print(f"[DEBUG] {os.path.basename(settings_path)}: Found status '{value}'")
+                                return value
+                    except json.JSONDecodeError:
+                        # Try as plain text
+                        f.seek(0)
+                        content = f.read().lower()
+                        for key, value in STATUS_MAPPING.items():
+                            if key in content:
+                                if self.debug:
+                                    print(f"[DEBUG] {os.path.basename(settings_path)} (text): Found status '{value}'")
+                                return value
 
             return None
 
         except Exception as e:
             if self.debug:
-                print(f"[DEBUG] settings.json error: {e}")
+                print(f"[DEBUG] settings error: {e}")
             return None
 
     def _read_from_storage_json(self):
-        """Read status from Teams storage JSON files"""
+        """Read status from Teams storage JSON files and IndexedDB"""
         try:
             # Teams stores presence in various JSON cache files
             storage_paths = [
                 os.path.join(self.teams_path, 'storage.json'),
                 os.path.join(self.teams_path, 'Cache', 'presence.json'),
                 os.path.join(self.teams_path, 'IndexedDB', 'https_teams.microsoft.com_0.indexeddb.leveldb'),
+                # New Teams 2.0 paths
+                os.path.join(self.teams_path, 'EBWebView', 'IndexedDB'),
             ]
 
             for storage_file in storage_paths:
@@ -209,15 +220,34 @@ class LocalTeamsMonitor:
                         if self.debug:
                             print(f"[DEBUG] Checking {storage_file}")
 
-                        with open(storage_file, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read().lower()
+                        # If it's a directory (IndexedDB), search all files in it
+                        if os.path.isdir(storage_file):
+                            for root, dirs, files in os.walk(storage_file):
+                                for file in files:
+                                    if file.endswith(('.log', '.ldb', '.leveldb')):
+                                        file_path = os.path.join(root, file)
+                                        try:
+                                            with open(file_path, 'rb') as f:
+                                                # Read as binary for IndexedDB files
+                                                content = f.read().decode('utf-8', errors='ignore').lower()
+                                                for key, value in STATUS_MAPPING.items():
+                                                    if key in content:
+                                                        if self.debug:
+                                                            print(f"[DEBUG] IndexedDB/{file}: Found status '{value}'")
+                                                        return value
+                                        except:
+                                                            continue
+                        else:
+                            # Regular file
+                            with open(storage_file, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read().lower()
 
-                            # Look for status patterns in the file
-                            for key, value in STATUS_MAPPING.items():
-                                if key in content:
-                                    if self.debug:
-                                        print(f"[DEBUG] {os.path.basename(storage_file)}: Found status '{value}'")
-                                    return value
+                                # Look for status patterns in the file
+                                for key, value in STATUS_MAPPING.items():
+                                    if key in content:
+                                        if self.debug:
+                                            print(f"[DEBUG] {os.path.basename(storage_file)}: Found status '{value}'")
+                                        return value
                     except Exception as e:
                         if self.debug:
                             print(f"[DEBUG] Error reading {storage_file}: {e}")
@@ -236,46 +266,58 @@ class LocalTeamsMonitor:
     def _read_from_logs_txt(self):
         """Read status from Teams log text files"""
         try:
-            logs_dir = os.path.join(self.teams_path, 'logs')
-            if not os.path.exists(logs_dir):
-                if self.debug:
-                    print(f"[DEBUG] logs directory not found at {logs_dir}")
-                return None
+            # Try both 'logs' and 'Logs' (new Teams uses capital L)
+            log_dirs = [
+                os.path.join(self.teams_path, 'logs'),
+                os.path.join(self.teams_path, 'Logs'),
+            ]
 
-            # Find the most recent log file
-            log_files = []
-            for file in os.listdir(logs_dir):
-                if file.endswith('.txt') or file.endswith('.log'):
-                    file_path = os.path.join(logs_dir, file)
-                    log_files.append((file_path, os.path.getmtime(file_path)))
+            for logs_dir in log_dirs:
+                if not os.path.exists(logs_dir):
+                    if self.debug:
+                        print(f"[DEBUG] {logs_dir} not found")
+                    continue
 
-            if not log_files:
-                if self.debug:
-                    print(f"[DEBUG] No log files found in {logs_dir}")
-                return None
+                # Find the most recent log file (check all MSTeams*.log files)
+                log_files = []
+                for file in os.listdir(logs_dir):
+                    if file.endswith('.txt') or file.endswith('.log'):
+                        file_path = os.path.join(logs_dir, file)
+                        log_files.append((file_path, os.path.getmtime(file_path)))
 
-            # Sort by modification time, most recent first
-            log_files.sort(key=lambda x: x[1], reverse=True)
-            most_recent_log = log_files[0][0]
+                if not log_files:
+                    if self.debug:
+                        print(f"[DEBUG] No log files found in {logs_dir}")
+                    continue
 
-            if self.debug:
-                print(f"[DEBUG] Reading log file: {os.path.basename(most_recent_log)}")
+                # Sort by modification time, most recent first
+                log_files.sort(key=lambda x: x[1], reverse=True)
 
-            # Read last 100 lines of the most recent log
-            with open(most_recent_log, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
+                # Check the most recent 3 log files
+                for log_file_path, _ in log_files[:3]:
+                    if self.debug:
+                        print(f"[DEBUG] Reading log file: {os.path.basename(log_file_path)}")
 
-                # Search backwards through recent log entries
-                for line in reversed(lines[-100:]):
-                    line_lower = line.lower()
+                    try:
+                        # Read last 200 lines of the log file
+                        with open(log_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            lines = f.readlines()
 
-                    # Look for presence/status updates
-                    if 'presence' in line_lower or 'availability' in line_lower or 'status' in line_lower:
-                        for key, value in STATUS_MAPPING.items():
-                            if key in line_lower:
-                                if self.debug:
-                                    print(f"[DEBUG] log file: Found status '{value}' in line: {line[:80]}...")
-                                return value
+                            # Search backwards through recent log entries
+                            for line in reversed(lines[-200:]):
+                                line_lower = line.lower()
+
+                                # Look for presence/status updates with various patterns
+                                if any(keyword in line_lower for keyword in ['presence', 'availability', 'status', 'userstate']):
+                                    for key, value in STATUS_MAPPING.items():
+                                        if key in line_lower:
+                                            if self.debug:
+                                                print(f"[DEBUG] log file: Found status '{value}' in line: {line[:80]}...")
+                                            return value
+                    except Exception as e:
+                        if self.debug:
+                            print(f"[DEBUG] Error reading {log_file_path}: {e}")
+                        continue
 
             return None
 
