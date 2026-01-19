@@ -25,8 +25,9 @@ This project monitors your Microsoft Teams presence status and displays it on an
 - Python 3.7+
 - Required Python packages:
   ```bash
-  pip install pyserial requests
+  pip install pyserial
   ```
+- Microsoft Teams desktop application (running on the same computer)
 
 ### Pico Side
 - MicroPython firmware installed on Pico
@@ -58,50 +59,7 @@ pip install adafruit-ampy
 ampy --port COM3 put "busylight pi-thon.py" main.py
 ```
 
-### 3. Configure Microsoft Graph API Access
-
-To access Teams presence status, you need to register an application in Azure AD:
-
-1. **Register an Azure AD App:**
-   - Go to [Azure Portal](https://portal.azure.com)
-   - Navigate to "Azure Active Directory" → "App registrations" → "New registration"
-   - Name: "Teams Busylight"
-   - Supported account types: "Accounts in this organizational directory only"
-   - Click "Register"
-
-2. **Configure API Permissions:**
-   - In your app, go to "API permissions"
-   - Click "Add a permission" → "Microsoft Graph" → "Application permissions"
-   - Add these permissions:
-     - `User.Read.All`
-     - `Presence.Read.All`
-   - Click "Grant admin consent" (requires admin privileges)
-
-3. **Create Client Secret:**
-   - Go to "Certificates & secrets" → "New client secret"
-   - Description: "Busylight Secret"
-   - Expiry: Choose your preferred duration
-   - Copy the secret value (you won't see it again!)
-
-4. **Get Your IDs:**
-   - **Tenant ID**: Found on the "Overview" page of your app
-   - **Client ID**: Also on the "Overview" page (Application ID)
-   - **User Email**: Your Microsoft 365 email address
-
-5. **Update Configuration:**
-
-   When you first run the PC-side script, it will create a `teams_config.json` file. Edit it with your values:
-
-   ```json
-   {
-       "tenant_id": "YOUR_TENANT_ID",
-       "client_id": "YOUR_CLIENT_ID",
-       "client_secret": "YOUR_CLIENT_SECRET",
-       "user_email": "your.email@company.com"
-   }
-   ```
-
-### 4. Configure Serial Port
+### 3. Configure Serial Port
 
 Edit `busylight PC side.py` and set the correct port:
 
@@ -121,7 +79,9 @@ mode
 ls /dev/tty* | grep -i usb
 ```
 
-### 5. Run the Monitor
+### 4. Run the Monitor
+
+Make sure Microsoft Teams desktop app is running, then:
 
 ```bash
 python "busylight PC side.py"
@@ -129,10 +89,35 @@ python "busylight PC side.py"
 
 You should see:
 ```
-Teams Busylight Monitor Started
-Connecting to Pico on COM3...
-[2026-01-14 10:30:00] Status changed to: Available
+Connected to Pico on COM3
+Teams data path: C:\Users\YourName\AppData\Roaming\Microsoft\Teams
+Teams Busylight Monitor Started (Local Mode)
+Monitoring Teams status from local files...
+Press Ctrl+C to exit
+
+[2026-01-19 10:30:00] Status changed to: Available
 ```
+
+## How It Works
+
+The monitor reads your Teams status **locally** from your computer without requiring Azure AD setup:
+
+1. **Process Detection**: Checks if Teams.exe is running
+2. **Local File Reading**: Reads status from multiple sources:
+   - `logs.db` - SQLite database with presence logs
+   - `storage.json` - Cached user status
+   - Log files - Recent activity logs
+3. **Status Updates**: Sends status changes to Pico via USB serial
+4. **LED Control**: Pico updates LED color based on received status
+
+**Advantages of Local Method:**
+- ✅ No Azure AD app registration required
+- ✅ No admin consent needed
+- ✅ Works offline (no internet required)
+- ✅ Instant updates (no API rate limits)
+- ✅ No credentials or secrets to manage
+
+**Note**: The local method reads Teams data files which may be locked while Teams is running. The script tries multiple methods to ensure reliable status detection.
 
 ## LED Color Mapping
 
@@ -182,15 +167,11 @@ else:
 - Check Device Manager (Windows) or `ls /dev/tty*` (Linux/Mac) for correct port
 - Make sure no other program (like Thonny) is using the serial port
 
-### "Error getting access token"
-- Verify `teams_config.json` has correct credentials
-- Ensure API permissions are granted and admin consent is given
-- Check that your client secret hasn't expired
-
-### "Error fetching presence"
-- Verify your user email is correct in config
-- Ensure the app has `Presence.Read.All` permission
-- Check that you're logged into Teams on the computer
+### "Teams data path not found" or status always shows "Offline"
+- Ensure Microsoft Teams desktop app is installed and running
+- Verify Teams is logged in and active
+- Check that Teams data folder exists at the path shown in console output
+- Try manually changing your Teams status to trigger file updates
 
 ### LED not lighting up
 - Check wiring connections
@@ -225,10 +206,11 @@ Create a Launch Agent in `~/Library/LaunchAgents/`
 
 ## Security Notes
 
-- Keep `teams_config.json` secure and never commit it to version control
-- Client secrets should be rotated periodically
-- Use application permissions (not delegated) for unattended operation
-- Consider using Azure Key Vault for production environments
+- The script reads local Teams data files (read-only access)
+- No credentials or API keys are stored or transmitted
+- All processing happens locally on your computer
+- Serial communication with Pico only sends status strings (e.g., "Available", "Busy")
+- No personal information or message content is accessed
 
 ## License
 

@@ -1,6 +1,3 @@
-# Configuration files with secrets
-teams_config.json
-
 # Python
 __pycache__/
 *.py[cod]

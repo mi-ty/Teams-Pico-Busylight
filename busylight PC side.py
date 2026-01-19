@@ -2,145 +2,242 @@ import serial
 import time
 import os
 import json
-import requests
-from datetime import datetime, timedelta
+import platform
+import sqlite3
+import re
+from datetime import datetime
+from pathlib import Path
 
 # Configure serial connection to Pico
 PICO_PORT = 'COM3'  # Windows - change to /dev/ttyACM0 on Linux/Mac
-ser = serial.Serial(PICO_PORT, 115200, timeout=1)
 
-# Microsoft Graph API Configuration
-# To use this, you need to register an app at https://portal.azure.com
-# and grant it User.Read and Presence.Read permissions
-CONFIG_FILE = 'teams_config.json'
-
-# Teams presence status mapping to standard status names
-PRESENCE_MAPPING = {
-    'Available': 'Available',
-    'AvailableIdle': 'Available',
-    'Away': 'Away',
-    'BeRightBack': 'BeRightBack',
-    'Busy': 'Busy',
-    'BusyIdle': 'Busy',
-    'DoNotDisturb': 'DoNotDisturb',
-    'Offline': 'Offline',
-    'PresenceUnknown': 'Offline',
-    'InACall': 'InACall',
-    'InAConferenceCall': 'InAMeeting',
-    'InAMeeting': 'InAMeeting',
-    'Presenting': 'Presenting',
+# Teams presence status mapping
+STATUS_MAPPING = {
+    'available': 'Available',
+    'busy': 'Busy',
+    'donotdisturb': 'DoNotDisturb',
+    'away': 'Away',
+    'berightback': 'BeRightBack',
+    'offline': 'Offline',
+    'incall': 'InACall',
+    'inaconferencecall': 'InAMeeting',
+    'inameeting': 'InAMeeting',
+    'presenting': 'Presenting',
 }
 
-class TeamsStatusMonitor:
+class LocalTeamsMonitor:
+    """Monitor Teams status by reading local files"""
+
     def __init__(self):
-        self.access_token = None
-        self.token_expiry = None
-        self.config = self.load_config()
+        self.teams_path = self._find_teams_path()
+        self.last_status = 'Offline'
+        print(f"Teams data path: {self.teams_path}")
 
-    def load_config(self):
-        """Load configuration from file"""
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r') as f:
-                return json.load(f)
-        else:
-            # Create default config file
-            default_config = {
-                "tenant_id": "YOUR_TENANT_ID",
-                "client_id": "YOUR_CLIENT_ID",
-                "client_secret": "YOUR_CLIENT_SECRET",
-                "user_email": "YOUR_EMAIL@company.com"
-            }
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(default_config, f, indent=4)
-            print(f"Created {CONFIG_FILE} - Please configure with your Azure AD app credentials")
-            return default_config
+    def _find_teams_path(self):
+        """Find Teams application data path"""
+        system = platform.system()
 
-    def get_access_token(self):
-        """Get OAuth access token for Microsoft Graph API"""
-        if self.access_token and self.token_expiry and datetime.now() < self.token_expiry:
-            return self.access_token
+        if system == 'Windows':
+            # Teams stores data in AppData\Roaming\Microsoft\Teams
+            base_path = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Teams')
+        elif system == 'Darwin':  # macOS
+            base_path = os.path.expanduser('~/Library/Application Support/Microsoft/Teams')
+        else:  # Linux
+            base_path = os.path.expanduser('~/.config/Microsoft/Microsoft Teams')
 
-        token_url = f"https://login.microsoftonline.com/{self.config['tenant_id']}/oauth2/v2.0/token"
+        return base_path
 
-        data = {
-            'client_id': self.config['client_id'],
-            'client_secret': self.config['client_secret'],
-            'scope': 'https://graph.microsoft.com/.default',
-            'grant_type': 'client_credentials'
-        }
-
+    def _is_teams_running(self):
+        """Check if Teams process is running"""
         try:
-            response = requests.post(token_url, data=data)
-            response.raise_for_status()
-            token_data = response.json()
-
-            self.access_token = token_data['access_token']
-            # Token expires in seconds, set expiry with 5 min buffer
-            expires_in = token_data.get('expires_in', 3600)
-            self.token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
-
-            return self.access_token
+            system = platform.system()
+            if system == 'Windows':
+                import subprocess
+                result = subprocess.run(['tasklist'], capture_output=True, text=True, timeout=2)
+                return 'Teams.exe' in result.stdout or 'ms-teams.exe' in result.stdout
+            elif system == 'Darwin':  # macOS
+                import subprocess
+                result = subprocess.run(['pgrep', '-x', 'Teams'], capture_output=True, timeout=2)
+                return result.returncode == 0
+            else:  # Linux
+                import subprocess
+                result = subprocess.run(['pgrep', '-f', 'teams'], capture_output=True, timeout=2)
+                return result.returncode == 0
         except Exception as e:
-            print(f"Error getting access token: {e}")
+            print(f"Error checking Teams process: {e}")
+            return False
+
+    def _read_from_logs_db(self):
+        """Read status from Teams logs.db SQLite database"""
+        try:
+            db_path = os.path.join(self.teams_path, 'logs.db')
+            if not os.path.exists(db_path):
+                return None
+
+            conn = sqlite3.connect(db_path, timeout=1)
+            cursor = conn.cursor()
+
+            # Query for recent presence/status entries
+            query = """
+                SELECT message FROM logs
+                WHERE message LIKE '%availability%'
+                   OR message LIKE '%presence%'
+                   OR message LIKE '%status%'
+                ORDER BY timestamp DESC
+                LIMIT 10
+            """
+
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            conn.close()
+
+            # Parse the most recent status from log messages
+            for row in rows:
+                message = row[0].lower()
+                for key, value in STATUS_MAPPING.items():
+                    if key in message:
+                        return value
+
             return None
 
-    def get_teams_presence(self):
-        """Get presence status from Microsoft Graph API"""
-        token = self.get_access_token()
-        if not token:
+        except Exception as e:
+            # Database might be locked or not exist
+            return None
+
+    def _read_from_storage_json(self):
+        """Read status from Teams storage JSON files"""
+        try:
+            # Teams stores presence in various JSON cache files
+            storage_paths = [
+                os.path.join(self.teams_path, 'storage.json'),
+                os.path.join(self.teams_path, 'Cache', 'presence.json'),
+                os.path.join(self.teams_path, 'IndexedDB', 'https_teams.microsoft.com_0.indexeddb.leveldb'),
+            ]
+
+            for storage_file in storage_paths:
+                if os.path.exists(storage_file):
+                    try:
+                        with open(storage_file, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read().lower()
+
+                            # Look for status patterns in the file
+                            for key, value in STATUS_MAPPING.items():
+                                if key in content:
+                                    return value
+                    except:
+                        continue
+
+            return None
+
+        except Exception as e:
+            return None
+
+    def _read_from_logs_txt(self):
+        """Read status from Teams log text files"""
+        try:
+            logs_dir = os.path.join(self.teams_path, 'logs')
+            if not os.path.exists(logs_dir):
+                return None
+
+            # Find the most recent log file
+            log_files = []
+            for file in os.listdir(logs_dir):
+                if file.endswith('.txt') or file.endswith('.log'):
+                    file_path = os.path.join(logs_dir, file)
+                    log_files.append((file_path, os.path.getmtime(file_path)))
+
+            if not log_files:
+                return None
+
+            # Sort by modification time, most recent first
+            log_files.sort(key=lambda x: x[1], reverse=True)
+            most_recent_log = log_files[0][0]
+
+            # Read last 100 lines of the most recent log
+            with open(most_recent_log, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+
+                # Search backwards through recent log entries
+                for line in reversed(lines[-100:]):
+                    line_lower = line.lower()
+
+                    # Look for presence/status updates
+                    if 'presence' in line_lower or 'availability' in line_lower or 'status' in line_lower:
+                        for key, value in STATUS_MAPPING.items():
+                            if key in line_lower:
+                                return value
+
+            return None
+
+        except Exception as e:
+            return None
+
+    def get_teams_status(self):
+        """Get current Teams status from local sources"""
+
+        # First check if Teams is running
+        if not self._is_teams_running():
             return 'Offline'
 
-        headers = {
-            'Authorization': f'Bearer {token}',
-            'Content-Type': 'application/json'
-        }
+        # Try multiple methods to get status
+        status = None
 
-        # Get user ID first
-        try:
-            user_url = f"https://graph.microsoft.com/v1.0/users/{self.config['user_email']}"
-            user_response = requests.get(user_url, headers=headers)
-            user_response.raise_for_status()
-            user_id = user_response.json()['id']
-
-            # Get presence
-            presence_url = f"https://graph.microsoft.com/v1.0/users/{user_id}/presence"
-            presence_response = requests.get(presence_url, headers=headers)
-            presence_response.raise_for_status()
-
-            presence_data = presence_response.json()
-            availability = presence_data.get('availability', 'PresenceUnknown')
-            activity = presence_data.get('activity', '')
-
-            # Map to our standard status
-            status = PRESENCE_MAPPING.get(availability, 'Offline')
-
-            # Override with activity if it's more specific
-            if activity in ['InACall', 'InAMeeting', 'Presenting']:
-                status = activity
-
+        # Method 1: Read from logs.db (most reliable if accessible)
+        status = self._read_from_logs_db()
+        if status:
+            self.last_status = status
             return status
 
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching presence: {e}")
-            return 'Offline'
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            return 'Offline'
+        # Method 2: Read from storage/cache JSON files
+        status = self._read_from_storage_json()
+        if status:
+            self.last_status = status
+            return status
+
+        # Method 3: Parse log text files
+        status = self._read_from_logs_txt()
+        if status:
+            self.last_status = status
+            return status
+
+        # If Teams is running but we can't determine status, assume Available
+        # or return last known status
+        return self.last_status if self.last_status != 'Offline' else 'Available'
 
 def get_teams_status():
     """Get current Teams status"""
     try:
-        return monitor.get_teams_presence()
+        return monitor.get_teams_status()
     except Exception as e:
         print(f"Error in get_teams_status: {e}")
         return 'Offline'
 
+# Initialize serial connection with error handling
+ser = None
+try:
+    ser = serial.Serial(PICO_PORT, 115200, timeout=1)
+    print(f"Connected to Pico on {PICO_PORT}")
+except serial.SerialException as e:
+    print(f"ERROR: Could not open serial port {PICO_PORT}")
+    print(f"Details: {e}")
+    print("\nPlease check:")
+    print("  1. Pico is connected via USB")
+    print("  2. Correct port is specified (check Device Manager on Windows, 'ls /dev/tty*' on Linux/Mac)")
+    print("  3. No other program is using the port (close Thonny, Arduino IDE, etc.)")
+    exit(1)
+
 # Initialize monitor
-monitor = TeamsStatusMonitor()
+try:
+    monitor = LocalTeamsMonitor()
+except Exception as e:
+    print(f"ERROR: Failed to initialize Teams monitor: {e}")
+    ser.close()
+    exit(1)
 
 # Main loop
-print("Teams Busylight Monitor Started")
-print(f"Connecting to Pico on {PICO_PORT}...")
+print("Teams Busylight Monitor Started (Local Mode)")
+print("Monitoring Teams status from local files...")
+print("Press Ctrl+C to exit\n")
 time.sleep(2)  # Give serial connection time to establish
 
 last_status = None
@@ -149,17 +246,31 @@ while True:
         current_status = get_teams_status()
 
         if current_status != last_status:
-            # Send status to Pico
-            ser.write(f"{current_status}\n".encode())
-            last_status = current_status
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{timestamp}] Status changed to: {current_status}")
+            # Send status to Pico with error handling
+            try:
+                ser.write(f"{current_status}\n".encode())
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"[{timestamp}] Status changed to: {current_status}")
+                last_status = current_status
+            except serial.SerialException as e:
+                print(f"ERROR: Serial communication failed: {e}")
+                print("Attempting to reconnect...")
+                try:
+                    ser.close()
+                    time.sleep(1)
+                    ser = serial.Serial(PICO_PORT, 115200, timeout=1)
+                    print("Reconnected successfully")
+                except:
+                    print("Reconnection failed. Exiting...")
+                    break
 
         time.sleep(5)  # Check every 5 seconds
 
     except KeyboardInterrupt:
-        print("\nShutting down...")
-        ser.close()
+        print("\n\nShutting down gracefully...")
+        if ser and ser.is_open:
+            ser.close()
+        print("Serial connection closed. Goodbye!")
         break
     except Exception as e:
         print(f"Error in main loop: {e}")
