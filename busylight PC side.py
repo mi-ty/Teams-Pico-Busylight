@@ -151,9 +151,16 @@ while True:
         if current_status != last_status:
             # Send status to Pico with error handling
             try:
-                ser.write(f"{current_status}\n".encode())
+                status_message = f"{current_status}\n"
+                ser.write(status_message.encode())
+
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 print(f"[{timestamp}] Status changed to: {current_status}")
+
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Sent to Pico via serial: '{current_status}'")
+                    print(f"[DEBUG] Bytes sent: {status_message.encode()}")
+
                 last_status = current_status
             except serial.SerialException as e:
                 print(f"ERROR: Serial communication failed: {e}")
